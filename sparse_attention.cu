@@ -173,3 +173,61 @@ __global__ void naive_attention(
     out[j]= out;
 }
 
+int main()
+{
+    const int N =64;
+    const int window =2;
+    const int stride =4;
+    // allocate host memory
+    float *hQ, *hK, *hV, *hO;
+    int *hMask;
+    hQ = new float[N*D]; // malloc also works
+    hK = new float[N*D];
+    hV = new float[N*D];
+    hO = new float[N*D];
+    hMask = new float[N*N];
+    for (int i=0;i<N*D;i++)
+    {
+        hQ[i] = (float)rand()/ RAND_MAX;
+        hK[i] = (float) rand()/ RAND_MAX;
+        hV[i] = (float) rand()/ RAND_MAX;
+
+    }
+    build_sparse_mask(hMask, N, window, stride);
+    // allocate device memory
+    float *dQ, *dK, *dV, *dO;
+    ind *dMask;
+
+    cudaMalloc (&dQ, N*D*sizeof(float));
+    cudaMalloc (&dK, N*D*sizeof(float));
+    cudaMalloc (&dV, N*D*sizeof(float));
+    cudaMalloc (&dO, N*D*sizeof(float));
+    cudaMalloc (&dMask, N*N*sizeof(float));
+
+    cudaMemcpy (dQ, hQ, N*D*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy (dK, hK, N*D*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy (dV, hV, N*D*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy (dMask, hMask, N*N*sizeof(float), cudaMemcpyHostToDevice);
+
+    dim3 block(Br , D);
+    dim3 grid(N/Br);
+    sparse_attention <<< grid, block>>> (dQ, dK, dV, dO, dMask, N);
+
+    cudaMemcpy (hO, dO, N*D*sizeof(float), cudaMemcpyDeviceToHost);
+
+    printf("O[0][0] = %f\n", hO[0]);
+    delete[] hQ ;
+    delete[] hK ;
+    delete[] hV ;
+    delete[] hO ;
+    delete[] hMask;
+    cudaFree(dQ);
+    cudaFree(dK);
+    cudaFree(dV);
+    cudaFree(dO);
+    cudaFree(dMask);
+    return 0;
+
+
+
+}
