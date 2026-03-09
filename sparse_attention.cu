@@ -18,7 +18,7 @@ for (int i=0; i<seq_len; i++)
     for( int j=0; j< seq_len; j++)
     {
         bool local = abs(i-j) <= window;
-        bool global = (j%stride == 0)
+        bool global = (j%stride == 0);
         mask[i*seq_len+j] = local || global ? 1 : 0 ;
     }
 }
@@ -34,7 +34,7 @@ __global__ void flash_attention(
     float* V,
     float* O,
     int seq_len,
-    int * mask;
+    int * mask
 )
 {
     __shared__ float Qs[Br][D];
@@ -103,7 +103,7 @@ __global__ void flash_attention(
             sum_exp+= S[t];
             
         }
-        for(int t=0; t<N; t++)
+        for(int t=0; t<seq_len; t++)
         {
             S[t]/= sum_exp;
 
@@ -175,7 +175,7 @@ __global__ void naive_attention(
     {
         output+= S[t]*V[t*head_dim+j];
     }
-    out[j]= output;
+    O[i*head_dim+ j]= output;
 }
 
 int main()
