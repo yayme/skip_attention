@@ -31,6 +31,106 @@ for (int i=0; i<seq_len; i++)
 // threadIdx.x which row in the tile [0... 15]
 // threadIdx.y which column in the tile [0... 63]
 }
+
+__global__ void flash_attention_v2(    
+    float* Q,
+    float* K,
+    float* V,
+    float* O,
+    int seq_len,
+    int* mask
+)
+{
+    __shared__ float Qs[Br][D];
+    __shared__ float Ks[Bc][D];
+    __shared__ float Vs[Bc][D];
+
+    int tile_row_start = blockIdx.x * Br;
+    int global_row = tile_row_start + threadIdx.x;
+
+    // load Q tile cooperatively
+    if (global_row < seq_len && threadIdx.y < D)
+        Qs[threadIdx.x][threadIdx.y] = Q[global_row * D + threadIdx.y];
+    __syncthreads();
+
+    // ── online softmax accumulators (replaces S[1024]) ──
+    float m = -1e9f;      // running max
+    float l = 0.0f;       // running sum of exp
+    float acc[D];         // running output
+    for (int k = 0; k < D; k++) acc[k] = 0.0f;
+
+    for (int tile = 0; tile < seq_len / Bc; tile++)
+    {
+        int tile_col_start = tile * Bc;
+
+        // sparsity check
+        bool any_active = false;
+        for (int i = tile_row_start; i < tile_row_start + Br && !any_active; i++)
+            for (int j = tile_col_start; j < tile_col_start + Bc && !any_active; j++)
+                if (i < seq_len && j < seq_len && mask[i * seq_len + j])
+                    any_active = true;
+        if (!any_active) continue;
+
+        // load K/V tile
+        int global_kv_row = tile_col_start + threadIdx.x;
+        if (global_kv_row < seq_len && threadIdx.y < D) {
+            Ks[threadIdx.x][threadIdx.y] = K[global_kv_row * D + threadIdx.y];
+            Vs[threadIdx.x][threadIdx.y] = V[global_kv_row * D + threadIdx.y];
+        }
+        __syncthreads();
+
+        if (global_row < seq_len) {
+            // compute scores for this tile only (Bc floats, not N)
+            float scores[Bc];
+            for (int t = 0; t < Bc; t++) {
+                int key_idx = tile_col_start + t;
+                if (key_idx >= seq_len || !mask[global_row * seq_len + key_idx]) {
+                    scores[t] = -1e9f;  // mask out — will vanish after exp
+                    continue;
+                }
+                float score = 0.0f;
+                for (int k = 0; k < D; k++)
+                    score += Qs[threadIdx.x][k] * Ks[t][k];
+                scores[t] = score / sqrtf((float)D);
+            }
+
+            // find tile max
+            float m_tile = -1e9f;
+            for (int t = 0; t < Bc; t++)
+                m_tile = max(m_tile, scores[t]);
+
+            // update running max
+            float m_new = max(m, m_tile);
+
+            // rescale old accumulator
+            float scale = expf(m - m_new);
+            for (int k = 0; k < D; k++)
+                acc[k] *= scale;
+
+            // accumulate new tile into output
+            float l_tile = 0.0f;
+            for (int t = 0; t < Bc; t++) {
+                float a = expf(scores[t] - m_new);
+                l_tile += a;
+                for (int k = 0; k < D; k++)
+                    acc[k] += a * Vs[t][k];
+            }
+
+            // update running sum
+            l = l * scale + l_tile;
+            m = m_new;
+        }
+
+        __syncthreads();
+    }
+
+    // final output — divide by normalizer
+    if (global_row < seq_len) {
+        int j = threadIdx.y;
+        if (j < D)
+            O[global_row * D + j] = acc[j] / l;
+    }
+}
 __global__ void flash_attention(    
     float* Q,
     float* K,
@@ -199,6 +299,26 @@ torch::Tensor sparse_attention_forward(
     mask.data_ptr<int>()
 );
 return O;
+}
+torch::Tensor sparse_attention_v2_forward(
+    torch::Tensor Q,
+    torch::Tensor K,
+    torch::Tensor V,
+    torch::Tensor mask
+) {
+    int N = Q.size(0);
+    auto O = torch::zeros_like(Q);
+    dim3 block(Br, D);
+    dim3 grid(N / Br);
+    flash_attention_v2<<<grid, block>>>(
+        Q.data_ptr<float>(),
+        K.data_ptr<float>(),
+        V.data_ptr<float>(),
+        O.data_ptr<float>(),
+        N,
+        mask.data_ptr<int>()
+    );
+    return O;
 }
 // int main()
 // {
