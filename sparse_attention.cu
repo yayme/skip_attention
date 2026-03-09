@@ -197,7 +197,7 @@ torch::Tensor sparse_attention_forward(
     N,
     mask.data_ptr<int>()
 );
-return 0;
+return O;
 }
 // int main()
 // {

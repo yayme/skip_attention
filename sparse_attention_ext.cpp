@@ -1,4 +1,4 @@
-#include<torch/extensions.h>
+#include<torch/extension.h>
 
 torch::Tensor sparse_attention_forward(
     torch::Tensor Q,
