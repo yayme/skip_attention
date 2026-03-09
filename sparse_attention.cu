@@ -1,16 +1,16 @@
 #include<cuda_runtime.h>
 #include<math.h>
 #include<stdio.h>
-#define D 64; // head dim
-#define Br 16; // query tile size
-#define Bc`16; // key/value tile size
+#define D 64 // head dim
+#define Br 16 // query tile size
+#define Bc 16 // key/value tile size
 
 // local window global stride.
 void build_sparse_mask(
-int* mask; // seq_len*seq_len matrix
-int seq_len;
-int window;
-int stride;
+int* mask, // seq_len*seq_len matrix
+int seq_len,
+int window,
+int stride
 )
 {
 for (int i=0; i<seq_len; i++)
@@ -22,6 +22,11 @@ for (int i=0; i<seq_len; i++)
         mask[i*seq_len+j] = local || global ? 1 : 0 ;
     }
 }
+// say N= 64 tokens. split them into blocks of Br =16. 
+// e.g. block 0 handles queries [0..  15]
+// blockIdx.x gives which block
+// threadIdx.x which row in the tile [0... 15]
+// threadIdx.y which column in the tile [0... 63]
 }
 __global__ void flash_attention(    
     float* Q,
@@ -60,7 +65,7 @@ __global__ void flash_attention(
         }
         if(!any_active) continue; 
     int global_kv_row = tile_col_start + threadIdx.x;
-    int (global_kv_row <seq_len && threadIdx.y <D) {
+    if (global_kv_row <seq_len && threadIdx.y <D) {
         Ks[threadIdx.x][threadIdx.y] = K[global_kv_row*D + threadIdx.y];
         Vs[threadIdx.x][threadIdx.y] =  V[global_kv_row*D + threadIdx.y];
     }
@@ -69,12 +74,12 @@ __global__ void flash_attention(
     for (int t =0; t< Bc; t++)
     {
         int key_idx = tile_col_start + t;
-        if(global_row >= seq_len || key_idx  >= N) continue;
-        if(!mask[global_row*N+ key_idx]) continue;
+        if(global_row >= seq_len || key_idx  >= seq_len) continue;
+        if(!mask[global_row*seq_len+ key_idx]) continue;
         float score = 0.0f;
         for(int k=0; k< D; k++)
         {
-            score+= Qs[threadIdx.x][k]*K[t][k];
+            score+= Qs[threadIdx.x][k]*Ks[t][k];
 
         }
         S[key_idx] = score / sqrtf((float)D);
@@ -85,8 +90,8 @@ __global__ void flash_attention(
     
     }
 
-    if(global_row <N) {
-        float max_val = 0.0f;
+    if(global_row <seq_len) {
+        float max_val = -1e9f;
         for(int t=0;t<seq_len; t++)
         {
             if(max_val < S[t]) max_val= S[t];
@@ -139,10 +144,10 @@ __global__ void naive_attention(
     // O = A @ V;
     float  S[1024]; // assuming seq_len <= 1024
     // we need S[i,t]= dot (Q[i,:], K[t,:])
-    for (int t=0 ; t<=seq_len; t++)
+    for (int t=0 ; t<seq_len; t++)
     {
         float dot = 0.0f;
-        for(int s=0 ;s <= head_dim; s++)
+        for(int s=0 ;s < head_dim; s++)
         {
             
             dot+= Q[i*head_dim+s]*K[t*head_dim+s];
@@ -168,9 +173,9 @@ __global__ void naive_attention(
     float output =0.0f;
     for (int t=0;t<seq_len;t++)
     {
-        out+= S[t]*V[t*head_dim+j];
+        output+= S[t]*V[t*head_dim+j];
     }
-    out[j]= out;
+    out[j]= output;
 }
 
 int main()
@@ -185,7 +190,7 @@ int main()
     hK = new float[N*D];
     hV = new float[N*D];
     hO = new float[N*D];
-    hMask = new float[N*N];
+    hMask = new int[N*N];
     for (int i=0;i<N*D;i++)
     {
         hQ[i] = (float)rand()/ RAND_MAX;
@@ -196,18 +201,18 @@ int main()
     build_sparse_mask(hMask, N, window, stride);
     // allocate device memory
     float *dQ, *dK, *dV, *dO;
-    ind *dMask;
+    int *dMask;
 
     cudaMalloc (&dQ, N*D*sizeof(float));
     cudaMalloc (&dK, N*D*sizeof(float));
     cudaMalloc (&dV, N*D*sizeof(float));
     cudaMalloc (&dO, N*D*sizeof(float));
-    cudaMalloc (&dMask, N*N*sizeof(float));
+    cudaMalloc (&dMask, N*N*sizeof(int));
 
     cudaMemcpy (dQ, hQ, N*D*sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy (dK, hK, N*D*sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy (dV, hV, N*D*sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy (dMask, hMask, N*N*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy (dMask, hMask, N*N*sizeof(int), cudaMemcpyHostToDevice);
 
     dim3 block(Br , D);
     dim3 grid(N/Br);
