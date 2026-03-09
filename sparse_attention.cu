@@ -5,6 +5,8 @@
 #define Br 16 // query tile size
 #define Bc 16 // key/value tile size
 
+
+
 // local window global stride.
 void build_sparse_mask(
 int* mask, // seq_len*seq_len matrix
@@ -177,62 +179,81 @@ __global__ void naive_attention(
     }
     O[i*head_dim+ j]= output;
 }
-
-int main()
+torch::Tensor sparse_attention_forward(
+    torch::Tensor Q,
+    torch::Tensor K,
+    torch::Tensor V,
+    torch::Tensor mask
+)
 {
-    const int N =64;
-    const int window =2;
-    const int stride =4;
-    // allocate host memory
-    float *hQ, *hK, *hV, *hO;
-    int *hMask;
-    hQ = new float[N*D]; // malloc also works
-    hK = new float[N*D];
-    hV = new float[N*D];
-    hO = new float[N*D];
-    hMask = new int[N*N];
-    for (int i=0;i<N*D;i++)
-    {
-        hQ[i] = (float)rand()/ RAND_MAX;
-        hK[i] = (float) rand()/ RAND_MAX;
-        hV[i] = (float) rand()/ RAND_MAX;
-
-    }
-    build_sparse_mask(hMask, N, window, stride);
-    // allocate device memory
-    float *dQ, *dK, *dV, *dO;
-    int *dMask;
-
-    cudaMalloc (&dQ, N*D*sizeof(float));
-    cudaMalloc (&dK, N*D*sizeof(float));
-    cudaMalloc (&dV, N*D*sizeof(float));
-    cudaMalloc (&dO, N*D*sizeof(float));
-    cudaMalloc (&dMask, N*N*sizeof(int));
-
-    cudaMemcpy (dQ, hQ, N*D*sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy (dK, hK, N*D*sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy (dV, hV, N*D*sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy (dMask, hMask, N*N*sizeof(int), cudaMemcpyHostToDevice);
-
-    dim3 block(Br , D);
+    int N = Q.size(0);
+    auto O = torch::zeros_like(Q);
+    dim3 block(Br, D);
     dim3 grid(N/Br);
-    sparse_attention <<< grid, block>>> (dQ, dK, dV, dO, dMask, N);
-
-    cudaMemcpy (hO, dO, N*D*sizeof(float), cudaMemcpyDeviceToHost);
-
-    printf("O[0][0] = %f\n", hO[0]);
-    delete[] hQ ;
-    delete[] hK ;
-    delete[] hV ;
-    delete[] hO ;
-    delete[] hMask;
-    cudaFree(dQ);
-    cudaFree(dK);
-    cudaFree(dV);
-    cudaFree(dO);
-    cudaFree(dMask);
-    return 0;
-
-
-
+    flash_attention<<< grid, block>>> (Q.data_ptr<float>(),
+    K.data_ptr<float>(),
+    V.data_ptr<float>(),
+    O.data_ptr<float>(),
+    N,
+    mask.data_ptr<int>()
+);
+return 0;
 }
+// int main()
+// {
+//     const int N =64;
+//     const int window =2;
+//     const int stride =4;
+//     // allocate host memory
+//     float *hQ, *hK, *hV, *hO;
+//     int *hMask;
+//     hQ = new float[N*D]; // malloc also works
+//     hK = new float[N*D];
+//     hV = new float[N*D];
+//     hO = new float[N*D];
+//     hMask = new int[N*N];
+//     for (int i=0;i<N*D;i++)
+//     {
+//         hQ[i] = (float)rand()/ RAND_MAX;
+//         hK[i] = (float) rand()/ RAND_MAX;
+//         hV[i] = (float) rand()/ RAND_MAX;
+
+//     }
+//     build_sparse_mask(hMask, N, window, stride);
+//     // allocate device memory
+//     float *dQ, *dK, *dV, *dO;
+//     int *dMask;
+
+//     cudaMalloc (&dQ, N*D*sizeof(float));
+//     cudaMalloc (&dK, N*D*sizeof(float));
+//     cudaMalloc (&dV, N*D*sizeof(float));
+//     cudaMalloc (&dO, N*D*sizeof(float));
+//     cudaMalloc (&dMask, N*N*sizeof(int));
+
+//     cudaMemcpy (dQ, hQ, N*D*sizeof(float), cudaMemcpyHostToDevice);
+//     cudaMemcpy (dK, hK, N*D*sizeof(float), cudaMemcpyHostToDevice);
+//     cudaMemcpy (dV, hV, N*D*sizeof(float), cudaMemcpyHostToDevice);
+//     cudaMemcpy (dMask, hMask, N*N*sizeof(int), cudaMemcpyHostToDevice);
+
+//     dim3 block(Br , D);
+//     dim3 grid(N/Br);
+//     sparse_attention <<< grid, block>>> (dQ, dK, dV, dO, dMask, N);
+
+//     cudaMemcpy (hO, dO, N*D*sizeof(float), cudaMemcpyDeviceToHost);
+
+//     printf("O[0][0] = %f\n", hO[0]);
+//     delete[] hQ ;
+//     delete[] hK ;
+//     delete[] hV ;
+//     delete[] hO ;
+//     delete[] hMask;
+//     cudaFree(dQ);
+//     cudaFree(dK);
+//     cudaFree(dV);
+//     cudaFree(dO);
+//     cudaFree(dMask);
+//     return 0;
+
+
+
+// }
