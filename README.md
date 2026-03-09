@@ -1,8 +1,8 @@
-# Sparse attention
+# skip_attention
 
-This is an exploratory project to implement a CUDA kernel for sparse attention with running max and benchmark its performance against PyTorch's dense attention. Built this to understand what actually happens inside Flash Attention and not just use it as a black box.
+This is an exploratory project to implement a CUDA kernel for sparse attention and benchmark its performance against PyTorch's dense attention. Built this to understand what actually happens inside Flash Attention , not just use it as a black box.
 
-The core idea: instead of computing attention between every pair of tokens (O(n²)), define a sparsity pattern and skip tiles that have no active token pairs entirely. The pattern used here is a local window of `w` nearby tokens plus global tokens every `s` steps — same idea as Longformer.
+The core idea: instead of computing attention between every pair of tokens (O(n²)), define a sparsity pattern and skip tiles that have no active token pairs entirely. The pattern used here is a local window of `w` nearby tokens plus global tokens every `s` steps , same idea as Longformer.
 
 ---
 
@@ -89,6 +89,21 @@ Replaces `S[N]` with four scalars per thread: running max `m`, running denominat
 Both custom kernels are slower than PyTorch dense at these sequence lengths. That's expected — PyTorch uses cuBLAS which is optimized at the assembly level. The sparsity advantage should show up at N ≥ 2048 where skipping O(n²) tiles actually saves meaningful work vs the kernel launch overhead.
 
 The more interesting result is v2 vs v1 — the online softmax rewrite gives a consistent 1.4–1.8× speedup just by eliminating the `S[N]` array. Same algorithm, same sparsity pattern, just better memory behavior.
+
+---
+
+## Key things learned
+
+**Flat indexing** Python slice is easy to use. It took me a while to get used to flat indexing and be able to mentally calculate them.
+
+**`__syncthreads()` has two jobs, not one.** One call protects reads (don't read shared memory before everyone's written to it), another protects writes (don't overwrite the tile before everyone's done reading it). 
+
+**Shared memory size must be known at compile time.** You can't do `__shared__ float Qs[Br][d]` if `d` is a runtime variable. Either hardcode it, use a template parameter, or use dynamic shared memory with `extern __shared__`.
+
+**Register pressure is a real constraint.** `float S[1024]` looks innocent but puts 1024 floats per thread into local memory, which spills to global memory when registers run out. With 1024 threads per block that's enough to hit `cudaErrorLaunchOutOfResources` before the kernel even starts. The fix **online softmax** isn't just algorithmically cleaner, it's what makes the kernel actually launchable at scale.
+
+**Doing extra work to avoid work can backfire.** The `any_active` sparsity check inside the kernel reads global memory for every tile to decide whether to skip it. At short sequences this overhead dominates any savings from skipping. Precomputing the active tile list on the CPU and passing it in would remove this entirely.
+
 
 ---
 
