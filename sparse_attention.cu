@@ -1,3 +1,124 @@
+#include<cuda_runtime.h>
+#include<math.h>
+#include<stdio.h>
+#define D 64; // head dim
+#define Br 16; // query tile size
+#define Bc`16; // key/value tile size
+
+// local window global stride.
+void build_sparse_mask(
+int* mask; // seq_len*seq_len matrix
+int seq_len;
+int window;
+int stride;
+)
+{
+for (int i=0; i<seq_len; i++)
+{
+    for( int j=0; j< seq_len; j++)
+    {
+        bool local = abs(i-j) <= window;
+        bool global = (j%stride == 0)
+        mask[i*seq_len+j] = local || global ? 1 : 0 ;
+    }
+}
+}
+__global__ void flash_attention(    
+    float* Q,
+    float* K,
+    float* V,
+    float* O,
+    int seq_len,
+    int * mask;
+)
+{
+    __shared__ float Qs[Br][D];
+    __shared__ float Ks[Bc][D];
+    __shared__ float vs[Bc][D];
+    int tile_row_start = blockIdx.x*Br; // 
+    int global_row = tile_row_start + threadIdx.x;
+    if (global_row <seq_len && threadIdx.y <D)
+        Qs[threadIdx.x][threadIdx.y] = Q[global_row*D+ threadIdx.y];
+    __syncthreads();
+
+    float  S[1024] = {0.0f};
+    for (int tile =0; tile < seq_len/Bc; tile++)
+    {
+        int tile_col_start = tile*Bc;
+
+    
+            bool any_active = false;
+        for (int i= tile_row_start; i < tile_row_start+Br ; i++)
+        {
+            for(int j= tile_col_start; j< tile_col_start+Bc;j++)
+            {
+                if(mask[i*seq_len+j]){
+                    any_active = true;
+                    break;
+                }
+            }
+        }
+        if(!any_active) continue; 
+    int global_kv_row = tile_col_start + threadIdx.x;
+    int (global_kv_row <seq_len && threadIdx.y <D) {
+        Ks[threadIdx.x][threadIdx.y] = K[global_kv_row*D + threadIdx.y];
+        Vs[threadIdx.x][threadIdx.y] =  V[global_kv_row*D + threadIdx.y];
+    }
+    __syncthreads();
+    // compute partial scores for this tile.
+    for (int t =0; t< Bc; t++)
+    {
+        int key_idx = tile_col_start + t;
+        if(global_row >= seq_len || key_idx  >= N) continue;
+        if(!mask[global_row*N+ key_idx]) continue;
+        float score = 0.0f;
+        for(int k=0; k< D; k++)
+        {
+            score+= Qs[threadIdx.x][k]*K[t][k];
+
+        }
+        S[key_idx] = score / sqrtf((float)D);
+
+    }
+    __syncthreads();
+    
+    
+    }
+
+    if(global_row <N) {
+        float max_val = 0.0f;
+        for(int t=0;t<seq_len; t++)
+        {
+            if(max_val < S[t]) max_val= S[t];
+        }
+        float sum_exp =0.0f;
+        for(int t =0;t<seq_len; t++)
+        {
+            S[t]= expf(S[t]- max_val);
+            sum_exp+= S[t];
+            
+        }
+        for(int t=0; t<N; t++)
+        {
+            S[t]/= sum_exp;
+
+
+        }
+        int j= threadIdx.y;
+        if (j<D)
+        {
+            float output = 0.0f;
+            for(int t=0;t<seq_len;t++)
+        {
+            output+=S[t]*V[t*D+j];
+
+        }
+        O[global_row*D+j] = output;
+        }
+    }
+
+}
+
 __global__ void naive_attention(
     float* Q,
     float* K,
@@ -52,68 +173,3 @@ __global__ void naive_attention(
     out[j]= out;
 }
 
-__global__ void tiled_attention(
-    float* Q,
-    float* K,
-    float* V,
-    float* O,
-    int seq_len,
-    int head_dim
-)
-{   const int Br= 16; // row, query tile size
-    const int Bc=16; // column key value tile size
-    // __shared__ float Qs[Br][head_dim];
-    // __shared__ float Ks[Bc][head_dim];
-    // __shared__ float Vs[Bc][head_dim];
-    // cuda doesn't allow dynamic values in __shared__ array dimensions.
-    __shared__ float Qs[Br][64];
-    __shared__ float Ks[Bc][64];
-    __shared__ float Vs[Bc][64];
-    
-    int tile_row = threadIdx.x;
-    int tile_col = threadIdx.y;
-
-    int global_row = blockIdx.x*Br + tile_row;
-    Qs[tile_row][tile_col]= Q[global_row*head_dim+ tile_col]
-
-    for(int tile =0; tile <N/Bc;tile++)
-    {
-        //cooperatively load K and V tiles
-        int global_row = tile*Bc+ threadIdx.x;
-        Ks[threadIdx.x][threadIdx.y]= K[threadIdx.x*head_dim+ threadIdx.y];
-        Vs[threadIdx.x][threadIdx.y] = V[threadIdx.x*head_dim+ threadIdx.y];
-        __syncthreads()
-        for(int t=0;t<Bc;t++)
-        {
-            float score = 0.0f;
-            for(int k=0;k<head_dim;k++)
-            {
-                score+= Qs[threadIdx.x][k]*Ks[t][k];
-            }
-            score/= sqrt((float)head_dim);
-            S[tile*Bc+ t] = score;
-        }
-        __syncthreads();
-    }
-
-
-
-}
-   // local window global stride.
-   void build_sparse_mask(
-    int* mask; // seq_len*seq_len matrix
-    int seq_len;
-    int window;
-    int stride;
-   )
-   {
-    for (int i=0; i<seq_len; i++)
-    {
-        for( int j=0; j< seq_len; j++)
-        {
-            bool local = abs(i-j) <= window;
-            bool global = (j%stride == 0)
-            mask[i*seq_len+j] = local || global ? 1 : 0 ;
-        }
-    }
-   }
